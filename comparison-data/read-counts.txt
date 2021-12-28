@@ -1,0 +1,13 @@
+analysis	sample	matched_reads
+guide-counter --exact	plasmid	8758764
+guide-counter --exact	RepA	64107160
+guide-counter --exact	RepB	70347268
+guide-counter --exact	RepC	63477791
+guide-counter	plasmid	9318181
+guide-counter	RepA	69491160
+guide-counter	RepB	76248653
+guide-counter	RepC	68900168
+mageck count	plasmid	6716580
+mageck count	RepA	49074849
+mageck count	RepB	53814919
+mageck count	RepC	48579881
