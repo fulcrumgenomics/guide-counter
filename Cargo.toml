@@ -18,7 +18,7 @@ codegen-units = 1
 [dependencies]
 ahash = "0.7.6"
 anyhow = "1.0.48"
-clap = "3.0.0-beta.5"
+clap = { version = "3.0.0-rc.9", features = ["derive"] }
 csv = "1.1.5"
 enum_dispatch = "0.3.7"
 env_logger = "0.8.2"
