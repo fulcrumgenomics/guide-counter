@@ -43,12 +43,12 @@ type GuideMap<'a> = AHashMap<Vec<u8>, &'a Guide>;
 #[derive(Parser, Debug)]
 pub(crate) struct Count {
     /// Input fastq file(s)
-    #[clap(long, short = 'i', required = true)]
+    #[clap(long, short = 'i', required = true, multiple_values = true)]
     input: Vec<PathBuf>,
 
     /// Sample names corresponding to the input fastqs. If provided must be the same length as
     /// input.  Otherwise will be inferred from input file names.
-    #[clap(long, short = 's')]
+    #[clap(long, short = 's', multiple_values = true)]
     samples: Vec<String>,
 
     /// Path to the guide library metadata.  May be a tab- or comma-separated file.  Must have
