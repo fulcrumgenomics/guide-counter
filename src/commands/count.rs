@@ -254,11 +254,13 @@ impl Count {
                     let read_bases = rec.seq();
                     let read_length = read_bases.len();
 
-                    for trim in 0..=(read_length - guide_length) {
-                        let bases = &read_bases[trim..trim + guide_length];
+                    if read_length >= guide_length {
+                        for trim in 0..=(read_length - guide_length) {
+                            let bases = &read_bases[trim..trim + guide_length];
 
-                        if lookup.contains_key(bases) {
-                            prefix_lengths[trim] += 1;
+                            if lookup.contains_key(bases) {
+                                prefix_lengths[trim] += 1;
+                            }
                         }
                     }
 
@@ -801,5 +803,72 @@ mod tests {
         assert!((stat_records[0].mean_reads_per_guide - 600.0).abs() <= 0.01);
         assert!((stat_records[0].frac_mapped - 1800f64 / 1804f64).abs() <= 0.01);
         assert_eq!(stat_records[0].zero_read_guides, 0);
+    }
+
+    #[test]
+    fn test_reads_shorter_than_guides_ok() {
+        let tempdir = TempDir::new().unwrap();
+
+        // Write the library to disk
+        let library = test_library();
+        let library_path = tempdir.path().join("library.txt");
+        let mut lib_lines = vec!["guide\tbases\tgene".to_string()];
+        for guide in library.guides.iter() {
+            lib_lines.push(format!("{}\t{}\t{}", guide.id, guide.bases_str, guide.gene));
+        }
+        Io::default().write_lines(&library_path, &lib_lines).unwrap();
+
+        // Generate a fastq of reads to count
+        let mut reads = vec![];
+        reads.push("A".to_string());
+        reads.push("AC".to_string());
+        reads.push("ACG".to_string());
+        reads.push("ACGT".to_string());
+        reads.push("ACGTA".to_string());
+        reads.push("ACGTAC".to_string());
+        reads.push("ACGTACG".to_string());
+        reads.push("ACGTACGT".to_string());
+        reads.push("ACGTACGTA".to_string());
+        reads.push("ACGTACGTAC".to_string());
+
+        // Create a bunch of reads all with the guide at offset=5, with each guide getting:
+        for _ in 0..100 {
+            for guide in library.guides.iter() {
+                for _ in 0..=guide.index {
+                    reads.push(format!("ttttt{}ggggg", guide.bases_str));
+                }
+            }
+        }
+
+        // Lastly create some reads that are longer than a guide length but shorter than
+        // guide-length + max prefix
+        reads.push("tttttACGTACGT".to_string());
+        reads.push("tttttACGTACGTA".to_string());
+        reads.push("tttttACGTACGTAC".to_string());
+
+        let fastq = write_fastq(&reads, tempdir.path().join("in.fastq"));
+
+        // Run the count command
+        let prefix = tempdir.path().join("out").to_str().unwrap().to_string();
+        let counts = tempdir.path().join("out.counts.txt");
+        let stats = tempdir.path().join("out.stats.txt");
+
+        let cmd = Count {
+            library: library_path,
+            input: vec![fastq],
+            essential_genes: None,
+            nonessential_genes: None,
+            control_guides: None,
+            control_pattern: None,
+            samples: vec!["sample1".to_string()],
+            output: prefix,
+            exact_match: false,
+            offset_min_fraction: 0.005,
+            offset_sample_size: 100000,
+        };
+
+        cmd.execute().unwrap();
+        assert!(counts.exists());
+        assert!(stats.exists());
     }
 }
