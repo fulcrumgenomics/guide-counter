@@ -7,7 +7,6 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 
-
 /// Guides can either target essential genes, non-essential genes, control sequences
 /// or other genes.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]

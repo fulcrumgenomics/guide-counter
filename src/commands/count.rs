@@ -517,8 +517,8 @@ impl<'a> CountResult<'a> {
 
 #[cfg(test)]
 mod tests {
-    use fgoxide::io::{DelimFile, Io};
     use super::*;
+    use fgoxide::io::{DelimFile, Io};
     use tempfile::TempDir;
 
     #[test]
