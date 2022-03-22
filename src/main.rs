@@ -1,6 +1,5 @@
 pub mod commands;
 pub mod guide;
-pub mod io;
 
 use anyhow::Result;
 use clap::Parser;

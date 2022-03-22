@@ -1,12 +1,11 @@
 use anyhow::{anyhow, bail, Result};
+use fgoxide::io::Io;
 use itertools::Itertools;
 use log::*;
 use regex::RegexBuilder;
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
-
-use crate::io::Io;
 
 /// Guides can either target essential genes, non-essential genes, control sequences
 /// or other genes.
