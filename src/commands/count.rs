@@ -1,10 +1,10 @@
 use crate::command::Command;
 use crate::guide::*;
-use crate::io::{DelimFile, Io};
 use ahash::AHashMap;
 use anyhow::Result;
 use clap::Parser;
 use fastq::{parse_path, Record};
+use fgoxide::io::{DelimFile, Io};
 use itertools::Itertools;
 use log::*;
 use serde::{Deserialize, Serialize};
@@ -445,7 +445,8 @@ impl Count {
             })
             .collect_vec();
 
-        DelimFile::default().write_tsv(&stats_file, recs)
+        DelimFile::default().write_tsv(&stats_file, recs)?;
+        Ok(())
     }
 
     /// Simple method to round f64s to a maximum number of decimal places
@@ -516,6 +517,7 @@ impl<'a> CountResult<'a> {
 
 #[cfg(test)]
 mod tests {
+    use fgoxide::io::{DelimFile, Io};
     use super::*;
     use tempfile::TempDir;
 
