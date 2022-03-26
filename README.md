@@ -5,6 +5,7 @@
   <a href="https://github.com/fulcrumgenomics/guide-counter/actions?query=workflow%3ACheck"><img src="https://github.com/fulcrumgenomics/guide-counter/workflows/Check/badge.svg" alt="Build Status"></a>
   <a href="https://crates.io/crates/guide-counter"><img src="https://img.shields.io/crates/v/guide-counter.svg?colorB=319e8c" alt="Version info"></a>
   <a href="http://bioconda.github.io/recipes/guide-counter/README.html"><img src="https://img.shields.io/conda/dn/bioconda/guide-counter.svg?label=bioconda" alt="Bioconda"></a>
+  <a href="https://doi.org/10.5281/zenodo.6375791"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.6375791.svg" alt="DOI"></a>
   <br>
   A better, faster way to count guides in CRISPR screens.
 </p>
