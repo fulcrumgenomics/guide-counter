@@ -1,7 +1,7 @@
 use crate::command::Command;
 use crate::guide::*;
 use ahash::AHashMap;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use fastq::{parse_path, Record};
 use fgoxide::io::{DelimFile, Io};
@@ -268,7 +268,7 @@ impl Count {
                     count < sample_size
                 })
                 .expect("Failed to parse.");
-        })?;
+        }).context(format!("Failed to read {:?}", fastq))?;
 
         let total_matched: u64 = prefix_lengths.iter().sum();
         let fraction_matched = total_matched as f64 / count as f64;
