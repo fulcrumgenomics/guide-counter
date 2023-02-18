@@ -243,35 +243,56 @@ impl Count {
         min_fraction: f64,
     ) -> Result<PrefixInfo> {
         let guide_length = library.guide_length;
-        let mut prefix_lengths = vec![0u64; 500];
+        let mut prefix_lengths = vec![0f64; 500];
         let mut count = 0u64;
 
         // Parse the first `sample_size` records to find exact match guides and
         // extract the sequence that precedes the guide
         parse_path(Some(fastq), |parser| {
-            parser
-                .each(|rec| {
-                    let read_bases = rec.seq();
-                    let read_length = read_bases.len();
+            let mut read_offsets = Vec::<usize>::with_capacity(5);
 
-                    if read_length >= guide_length {
-                        for trim in 0..=(read_length - guide_length) {
-                            let bases = &read_bases[trim..trim + guide_length];
+            parser.each(|rec| {
+                let read_bases = rec.seq();
+                let read_length = read_bases.len();
 
-                            if lookup.contains_key(bases) {
-                                prefix_lengths[trim] += 1;
-                            }
+                if read_length >= guide_length {
+                    for trim in 0..=(read_length - guide_length) {
+                        let bases = &read_bases[trim..trim + guide_length];
+
+                        if lookup.contains_key(bases) {
+                            read_offsets.push(trim);
                         }
                     }
+                }
 
-                    count += 1;
-                    count < sample_size
-                })
-                .expect("Failed to parse.");
+                // If the read only matched at a single offset, just use it; otherwise prefer
+                // match(es) that are perfect matches and allocation proportionally.
+                if read_offsets.len() == 1 {
+                    prefix_lengths[read_offsets[0]] += 1.0;
+                }
+                else if read_offsets.len() > 1 {
+                    let perfect_match_offsets = read_offsets.iter().copied().filter(|&off| {
+                        let bases = &read_bases[off..off + guide_length];
+                        let guide = lookup.get(bases).unwrap();
+                        guide.bases.as_slice() == bases
+                    }).collect_vec();
+
+                    let preferred_offsets = if perfect_match_offsets.is_empty() { &read_offsets } else { &perfect_match_offsets };
+                    let addend = 1f64 / preferred_offsets.len() as f64;
+                    for offset in preferred_offsets.iter().copied() {
+                        prefix_lengths[offset] += addend;
+                    }
+                }
+
+                read_offsets.clear();
+                count += 1;
+                count < sample_size
+            })
+            .expect("Failed to parse.");
         })
         .context(format!("Failed to read {:?}", fastq))?;
 
-        let total_matched: u64 = prefix_lengths.iter().sum();
+        let total_matched: f64 = prefix_lengths.iter().sum();
         let fraction_matched = total_matched as f64 / count as f64;
         info!(
             "In {:?} examined {} reads for guide start position and matched {} ({:.4}).",
@@ -280,7 +301,7 @@ impl Count {
 
         // Tuple of offset -> count where count is > 0
         let non_zeros =
-            prefix_lengths.iter().copied().enumerate().filter(|(_idx, n)| *n > 0).collect_vec();
+            prefix_lengths.iter().copied().enumerate().filter(|(_idx, n)| *n > 0.0).collect_vec();
 
         info!(
             "{} read offsets: {}",
