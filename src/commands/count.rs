@@ -504,7 +504,7 @@ struct CountStats {
     zero_read_guides: u64,
 }
 
-impl<'a> CountResult<'a> {
+impl CountResult<'_> {
     /// Returns the total number of reads that mapped to a guide.
     pub fn mapped_reads(&self) -> u64 {
         self.counts.values().sum()
