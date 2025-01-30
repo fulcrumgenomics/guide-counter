@@ -7,8 +7,18 @@
   <a href="http://bioconda.github.io/recipes/guide-counter/README.html"><img src="https://img.shields.io/conda/dn/bioconda/guide-counter.svg?label=bioconda" alt="Bioconda"></a>
   <a href="https://doi.org/10.5281/zenodo.6375791"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.6375791.svg" alt="DOI"></a>
   <br>
-  A better, faster way to count guides in CRISPR screens.
 </p>
+
+A better, faster way to count guides in CRISPR screens.
+
+<p>
+<a href float="left"="https://fulcrumgenomics.com"><img src=".github/logos/fulcrumgenomics.svg" alt="Fulcrum Genomics" height="100"/></a>
+</p>
+
+[Visit us at Fulcrum Genomics](www.fulcrumgenomics.com) to learn more about how we can power your Bioinformatics with guide-counter and beyond.
+
+<a href="mailto:contact@fulcrumgenomics.com?subject=[GitHub inquiry]"><img src="https://img.shields.io/badge/Email_us-brightgreen.svg?&style=for-the-badge&logo=gmail&logoColor=white"/></a>
+<a href="https://www.fulcrumgenomics.com"><img src="https://img.shields.io/badge/Visit_Us-blue.svg?&style=for-the-badge&logo=wordpress&logoColor=white"/></a>
 
 ## Overview
 
