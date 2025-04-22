@@ -243,12 +243,14 @@ impl Count {
         min_fraction: f64,
     ) -> Result<PrefixInfo> {
         let guide_length = library.guide_length;
-        let mut prefix_lengths = vec![0u64; 500];
+        let mut prefix_lengths = vec![0f64; 500];
         let mut count = 0u64;
 
         // Parse the first `sample_size` records to find exact match guides and
         // extract the sequence that precedes the guide
         parse_path(Some(fastq), |parser| {
+            let mut read_offsets = Vec::<usize>::with_capacity(5);
+
             parser
                 .each(|rec| {
                     let read_bases = rec.seq();
@@ -259,11 +261,39 @@ impl Count {
                             let bases = &read_bases[trim..trim + guide_length];
 
                             if lookup.contains_key(bases) {
-                                prefix_lengths[trim] += 1;
+                                read_offsets.push(trim);
                             }
                         }
                     }
 
+                    // If the read only matched at a single offset, just use it; otherwise prefer
+                    // match(es) that are perfect matches and allocation proportionally.
+                    #[allow(clippy::comparison_chain)]
+                    if read_offsets.len() == 1 {
+                        prefix_lengths[read_offsets[0]] += 1.0;
+                    } else if read_offsets.len() > 1 {
+                        let perfect_match_offsets = read_offsets
+                            .iter()
+                            .copied()
+                            .filter(|&off| {
+                                let bases = &read_bases[off..off + guide_length];
+                                let guide = lookup.get(bases).unwrap();
+                                guide.bases.as_slice() == bases
+                            })
+                            .collect_vec();
+
+                        let preferred_offsets = if perfect_match_offsets.is_empty() {
+                            &read_offsets
+                        } else {
+                            &perfect_match_offsets
+                        };
+                        let addend = 1.0 / preferred_offsets.len() as f64;
+                        for offset in preferred_offsets.iter().copied() {
+                            prefix_lengths[offset] += addend;
+                        }
+                    }
+
+                    read_offsets.clear();
                     count += 1;
                     count < sample_size
                 })
@@ -271,8 +301,8 @@ impl Count {
         })
         .context(format!("Failed to read {:?}", fastq))?;
 
-        let total_matched: u64 = prefix_lengths.iter().sum();
-        let fraction_matched = total_matched as f64 / count as f64;
+        let total_matched: f64 = prefix_lengths.iter().sum();
+        let fraction_matched = total_matched / count as f64;
         info!(
             "In {:?} examined {} reads for guide start position and matched {} ({:.4}).",
             fastq, count, total_matched, fraction_matched
@@ -280,7 +310,7 @@ impl Count {
 
         // Tuple of offset -> count where count is > 0
         let non_zeros =
-            prefix_lengths.iter().copied().enumerate().filter(|(_idx, n)| *n > 0).collect_vec();
+            prefix_lengths.iter().copied().enumerate().filter(|(_idx, n)| *n > 0.0).collect_vec();
 
         info!(
             "{} read offsets: {}",
@@ -291,7 +321,7 @@ impl Count {
         // Filter to just those trim lengths that have at least min_fraction of the data each
         let trims_to_return: Vec<usize> = non_zeros
             .into_iter()
-            .filter(|(_idx, n)| *n as f64 / total_matched as f64 >= min_fraction)
+            .filter(|(_idx, n)| *n / total_matched >= min_fraction)
             .map(|(idx, _n)| idx)
             .collect();
 
