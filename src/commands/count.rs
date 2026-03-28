@@ -184,7 +184,7 @@ impl Count {
     /// keys for every exact guide sequence (in upper case).  If `allow_mismatch` is true,
     /// the map will also contain keys for every one-mismatch version of every guide with the
     /// exception of any sequences that match equally well to multiple guides.
-    fn build_lookup(library: &GuideLibrary, allow_mismatch: bool) -> GuideMap {
+    fn build_lookup<'a>(library: &'a GuideLibrary, allow_mismatch: bool) -> GuideMap<'a> {
         info!("Building lookup.");
         let mut lookup = GuideMap::default();
         let mut dupes = HashSet::new();
@@ -341,7 +341,7 @@ impl Count {
                         }
 
                         count += 1;
-                        if count % 10_000_000 == 0 {
+                        if count.is_multiple_of(10_000_000) {
                             info!("Processed {}m reads from {:?}.", count / 1_000_000, fastq_path);
                         }
 
