@@ -14,9 +14,9 @@ A better, faster way to count guides in CRISPR screens.
 <p>
 <a href="https://fulcrumgenomics.com">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/logos/fulcrumgenomics-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset=".github/logos/fulcrumgenomics-light.svg">
-  <img alt="Fulcrum Genomics" src=".github/logos/fulcrumgenomics-light.svg" height="100">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/fulcrumgenomics/guide-counter/main/.github/logos/fulcrumgenomics-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/fulcrumgenomics/guide-counter/main/.github/logos/fulcrumgenomics-light.svg">
+  <img alt="Fulcrum Genomics" src="https://raw.githubusercontent.com/fulcrumgenomics/guide-counter/main/.github/logos/fulcrumgenomics-light.svg" height="100">
 </picture>
 </a>
 </p>
@@ -45,11 +45,11 @@ As an example, we ran data from the [Sanson et al][sanson-link] paper through bo
 
 The following plot shows the amount of data recovered per sample by each of three different analyses:
 
-![Read Counts from analyzing Sanson et al. data](comparison-data/read-counts.png)
+![Read Counts from analyzing Sanson et al. data](https://raw.githubusercontent.com/fulcrumgenomics/guide-counter/main/comparison-data/read-counts.png)
 
 And the following plot shows the runtime for each of the three analyses performed using a single CPU core/thread on an Intel Core i9 powered MacBook Pro laptop:
 
-![Runtimes from analyzing Sanson et al. data](comparison-data/runtimes.png)
+![Runtimes from analyzing Sanson et al. data](https://raw.githubusercontent.com/fulcrumgenomics/guide-counter/main/comparison-data/runtimes.png)
 
 ## Installation
 
