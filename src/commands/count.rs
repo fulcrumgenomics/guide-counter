@@ -1,7 +1,7 @@
 use crate::command::Command;
 use crate::guide::*;
 use ahash::AHashMap;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use fastq::{parse_path, Record};
 use fgoxide::io::{DelimFile, Io};
@@ -9,6 +9,7 @@ use itertools::Itertools;
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -102,6 +103,8 @@ pub(crate) struct Count {
 impl Command for Count {
     /// execute function that is called from the command line parser
     fn execute(&self) -> Result<()> {
+        Count::check_inputs_readable(&self.input)?;
+
         // Auto-fill the sample names if not given
         let sample_ids = if self.samples.is_empty() {
             self.input
@@ -163,6 +166,27 @@ impl Command for Count {
 
 /// Implementation of the Count command and related functions.
 impl Count {
+    /// Tries to open every input path so all unreadable files surface in one error.
+    fn check_inputs_readable(inputs: &[PathBuf]) -> Result<()> {
+        let problems: Vec<String> = inputs
+            .iter()
+            .filter_map(|p| match File::open(p) {
+                Ok(_) => None,
+                Err(e) => Some(format!("{}: {}", p.display(), e)),
+            })
+            .collect();
+
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Could not read {} input FASTQ file(s):\n  {}",
+                problems.len(),
+                problems.join("\n  ")
+            ))
+        }
+    }
+
     /// Returns a sample name given a fastq file. Strips off any .gz and fastq-like
     /// suffixes.  If the file doesn't have a valid filename, will return a name
     /// based on the index passed in.
@@ -529,6 +553,35 @@ mod tests {
         assert_eq!(Count::sample_name(PathBuf::from("/foo/splat.fastq").as_path(), 1), "splat");
         assert_eq!(Count::sample_name(PathBuf::from("/foo/splat.fastq.gz").as_path(), 1), "splat");
         assert_eq!(Count::sample_name(PathBuf::new().as_path(), 1), "s1");
+    }
+
+    #[test]
+    fn test_check_inputs_readable_ok() {
+        let tempdir = TempDir::new().unwrap();
+        let f1 = write_fastq(&["AAAA".to_string()], tempdir.path().join("a.fastq"));
+        let f2 = write_fastq(&["CCCC".to_string()], tempdir.path().join("b.fastq"));
+        Count::check_inputs_readable(&[f1, f2]).unwrap();
+    }
+
+    #[test]
+    fn test_check_inputs_readable_reports_missing_file() {
+        let tempdir = TempDir::new().unwrap();
+        let good = write_fastq(&["AAAA".to_string()], tempdir.path().join("a.fastq"));
+        let missing = tempdir.path().join("does_not_exist.fastq");
+        let err = Count::check_inputs_readable(&[good, missing.clone()]).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains(missing.to_str().unwrap()), "error did not mention path: {}", msg);
+    }
+
+    #[test]
+    fn test_check_inputs_readable_reports_all_missing_files() {
+        let tempdir = TempDir::new().unwrap();
+        let m1 = tempdir.path().join("missing1.fastq");
+        let m2 = tempdir.path().join("missing2.fastq");
+        let err = Count::check_inputs_readable(&[m1.clone(), m2.clone()]).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains(m1.to_str().unwrap()));
+        assert!(msg.contains(m2.to_str().unwrap()));
     }
 
     #[test]
