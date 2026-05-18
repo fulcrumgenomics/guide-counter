@@ -202,6 +202,12 @@ OPTIONS:
             Sample names corresponding to the input fastqs. If provided must be the same length as
             input.  Otherwise will be inferred from input file names
 
+    -r, --reverse-complement
+            Also match reads against the reverse complement of every guide.  Use when the
+            sequencing primer reads the antisense strand.  Reads matching either orientation
+            count toward the same guide; guides whose forward and RC sequences both match the
+            same read are excluded as ambiguous
+
     -x, --exact-match
             Perform exact matching only, don't allow mismatches between reads and guides
 ```

@@ -214,6 +214,22 @@ impl GuideLibrary {
         bases.iter().copied().all(|b| b == b'A' || b == b'C' || b == b'G' || b == b'T')
     }
 
+    /// Returns the reverse complement of an upper-case ACGT sequence. Panics on any other
+    /// byte; callers must validate input via [`GuideLibrary::is_acgt`] first.
+    pub fn reverse_complement(bases: &[u8]) -> Vec<u8> {
+        bases
+            .iter()
+            .rev()
+            .map(|b| match b {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                b'T' => b'A',
+                other => panic!("reverse_complement called with non-ACGT base: {}", *other as char),
+            })
+            .collect()
+    }
+
     /// Returns the number of guides in the library
     pub fn len(&self) -> usize {
         self.guides.len()
@@ -275,6 +291,39 @@ b3\tGGCTTCTAGATCGCTATA\tControl
         assert!(!GuideLibrary::is_acgt("AC GT".as_bytes()));
         assert!(!GuideLibrary::is_acgt("AC-GT".as_bytes()));
         assert!(!GuideLibrary::is_acgt("acgt".as_bytes()));
+    }
+
+    #[test]
+    fn test_reverse_complement_basic() {
+        assert_eq!(GuideLibrary::reverse_complement(b""), b"".to_vec());
+        assert_eq!(GuideLibrary::reverse_complement(b"A"), b"T".to_vec());
+        assert_eq!(GuideLibrary::reverse_complement(b"ACGT"), b"ACGT".to_vec());
+        assert_eq!(GuideLibrary::reverse_complement(b"AAAA"), b"TTTT".to_vec());
+        assert_eq!(GuideLibrary::reverse_complement(b"ACCGGT"), b"ACCGGT".to_vec());
+        assert_eq!(GuideLibrary::reverse_complement(b"GATTACA"), b"TGTAATC".to_vec());
+    }
+
+    #[test]
+    fn test_reverse_complement_round_trips() {
+        let seq = b"ACGTAGCATGCATGACGTTC";
+        let rc = GuideLibrary::reverse_complement(seq);
+        let rc_rc = GuideLibrary::reverse_complement(&rc);
+        assert_eq!(rc_rc, seq.to_vec());
+    }
+
+    #[test]
+    fn test_reverse_complement_palindrome_maps_to_itself() {
+        // Even-length palindromes equal their RC.
+        let pal = b"ACGT";
+        assert_eq!(GuideLibrary::reverse_complement(pal), pal.to_vec());
+        let pal = b"GAATTC";
+        assert_eq!(GuideLibrary::reverse_complement(pal), pal.to_vec());
+    }
+
+    #[test]
+    #[should_panic(expected = "non-ACGT")]
+    fn test_reverse_complement_panics_on_non_acgt() {
+        let _ = GuideLibrary::reverse_complement(b"ACNT");
     }
 
     #[test]
