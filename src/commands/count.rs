@@ -8,11 +8,85 @@ use fgoxide::io::{DelimFile, Io};
 use itertools::Itertools;
 use log::*;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-type GuideMap<'a> = AHashMap<Vec<u8>, &'a Guide>;
+/// Lex-min of `bases` and its reverse complement. Panics on non-ACGT input.
+fn canonical_form(bases: &[u8]) -> Vec<u8> {
+    let rc = GuideLibrary::reverse_complement(bases);
+    if rc.as_slice() < bases {
+        rc
+    } else {
+        bases.to_vec()
+    }
+}
+
+/// Guide lookup table built by [`Count::build_lookup`].
+struct GuideLookup<'a> {
+    map: AHashMap<Vec<u8>, &'a Guide>,
+    /// When true, `get` probes both orientations.
+    reverse_complement: bool,
+    /// Scratch buffer for the RC probe; `RefCell` keeps `get` `&self` and avoids
+    /// allocating per window.
+    rc_scratch: RefCell<Vec<u8>>,
+}
+
+impl<'a> GuideLookup<'a> {
+    fn new(reverse_complement: bool) -> Self {
+        Self { map: AHashMap::default(), reverse_complement, rc_scratch: RefCell::new(Vec::new()) }
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        self.map.reserve(additional);
+    }
+
+    /// Inserts `key` -> `guide`, returning the previous value if any.
+    fn insert(&mut self, key: Vec<u8>, guide: &'a Guide) -> Option<&'a Guide> {
+        self.map.insert(key, guide)
+    }
+
+    fn remove(&mut self, key: &[u8]) {
+        self.map.remove(key);
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Looks up a read window. In RC mode probes both orientations; if they resolve to
+    /// different guides, returns `None`. Non-ACGT windows skip the RC probe.
+    fn get(&self, window: &[u8]) -> Option<&'a Guide> {
+        let fwd = self.map.get(window).copied();
+        if !self.reverse_complement
+            || !window.iter().all(|&b| matches!(b, b'A' | b'C' | b'G' | b'T'))
+        {
+            return fwd;
+        }
+        let mut scratch = self.rc_scratch.borrow_mut();
+        scratch.clear();
+        scratch.reserve(window.len());
+        for &b in window.iter().rev() {
+            scratch.push(match b {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                b'T' => b'A',
+                _ => unreachable!("ACGT validated above"),
+            });
+        }
+        let rev = self.map.get(scratch.as_slice()).copied();
+        match (fwd, rev) {
+            (Some(a), Some(b)) if a != b => None,
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn contains(&self, window: &[u8]) -> bool {
+        self.get(window).is_some()
+    }
+}
 
 /// Counts the guides observed in a CRISPR screen, starting from one or more FASTQs.  FASTQs are
 /// one per sample and currently only single-end FASTQ inputs are supported.
@@ -84,6 +158,13 @@ pub(crate) struct Count {
     #[clap(long, short = 'x')]
     exact_match: bool,
 
+    /// Also match reads against the reverse complement of every guide.  Use when the
+    /// sequencing primer reads the antisense strand.  Reads matching either orientation
+    /// count toward the same guide; guides whose forward and RC sequences both match the
+    /// same read are excluded as ambiguous.
+    #[clap(long, short = 'r')]
+    reverse_complement: bool,
+
     /// The number of reads to be examined when determining the offsets at which guides may
     /// be found in the input reads.
     #[clap(long, short = 'N', default_value = "100000")]
@@ -126,7 +207,7 @@ impl Command for Count {
             &self.control_guides,
             &self.control_pattern,
         )?;
-        let lookup = Count::build_lookup(&library, !self.exact_match);
+        let lookup = Count::build_lookup(&library, !self.exact_match, self.reverse_complement);
 
         // Generate the counts per sample
         let results = self
@@ -180,49 +261,63 @@ impl Count {
         format!("s{}", idx)
     }
 
-    /// Builds a lookup from a Vec<u8> of bases to Guides.  The resulting HashMap will contain
-    /// keys for every exact guide sequence (in upper case).  If `allow_mismatch` is true,
-    /// the map will also contain keys for every one-mismatch version of every guide with the
-    /// exception of any sequences that match equally well to multiple guides.
-    fn build_lookup(library: &GuideLibrary, allow_mismatch: bool) -> GuideMap<'_> {
+    /// Builds the guide lookup. Keys cover exact sequences and (if `allow_mismatch`)
+    /// one-mismatch variants; keys matching two guides are dropped. In RC mode guides
+    /// are stored canonically; [`GuideLookup::get`] handles dual-orientation probing.
+    fn build_lookup(
+        library: &GuideLibrary,
+        allow_mismatch: bool,
+        reverse_complement: bool,
+    ) -> GuideLookup<'_> {
         info!("Building lookup.");
-        let mut lookup = GuideMap::default();
-        let mut dupes = HashSet::new();
 
-        lookup.reserve(library.len());
+        // Canonicalize every guide up front; canonical-form collisions between distinct
+        // guides (e.g. fwd of A equals RC of B) are ambiguous and excluded entirely.
+        let mut canonical_to_guide: AHashMap<Vec<u8>, &Guide> = AHashMap::default();
+        let mut ambiguous: HashSet<Vec<u8>> = HashSet::new();
+        for guide in library.guides.iter() {
+            let canonical =
+                if reverse_complement { canonical_form(&guide.bases) } else { guide.bases.clone() };
+            if canonical_to_guide.insert(canonical.clone(), guide).is_some() {
+                ambiguous.insert(canonical);
+            }
+        }
+        // Drop both colliders' canonicals; otherwise their 1-mismatch neighbourhoods would
+        // still be inserted below and resolve to one of two ambiguous guides.
+        for amb in &ambiguous {
+            canonical_to_guide.remove(amb);
+        }
+
+        let mut lookup = GuideLookup::new(reverse_complement);
+        let mut dupes: HashSet<Vec<u8>> = HashSet::new();
+
+        lookup.reserve(canonical_to_guide.len());
 
         if allow_mismatch {
-            lookup.reserve(library.len() + library.guide_length * 3);
+            lookup.reserve(canonical_to_guide.len() * (1 + library.guide_length * 3));
 
-            for guide in library.guides.iter() {
-                let bases = &guide.bases;
-
-                for i in 0..bases.len() {
+            for (canonical, guide) in &canonical_to_guide {
+                for i in 0..canonical.len() {
                     for b in [b'A', b'C', b'G', b'T'] {
-                        if bases[i] != b {
-                            let mut modded = bases.clone();
+                        if canonical[i] != b {
+                            let mut modded = canonical.clone();
                             modded[i] = b;
-
-                            let prev = lookup.insert(modded, guide);
-                            if prev.is_some() {
-                                let mut dupe = bases.clone();
-                                dupe[i] = b;
-                                dupes.insert(dupe);
+                            if lookup.insert(modded.clone(), guide).is_some() {
+                                dupes.insert(modded);
                             }
                         }
                     }
                 }
             }
 
-            // Make sure no duplicated sequences remain in the lookup
-            for dupe in dupes.into_iter() {
+            for dupe in dupes.drain() {
                 lookup.remove(&dupe);
             }
         }
 
-        // Insert all the exact matches last so they're always present
-        for guide in library.guides.iter() {
-            lookup.insert(guide.bases.clone(), guide);
+        // Insert exact matches last so they always override any 1-mismatch entry.
+        for (canonical, guide) in canonical_to_guide {
+            lookup.insert(canonical, guide);
         }
 
         info!("Lookup built with {} entries.", lookup.len());
@@ -238,7 +333,7 @@ impl Count {
         fastq: &Path,
         sample: &str,
         library: &GuideLibrary,
-        lookup: &GuideMap,
+        lookup: &GuideLookup,
         sample_size: u64,
         min_fraction: f64,
     ) -> Result<PrefixInfo> {
@@ -258,7 +353,7 @@ impl Count {
                         for trim in 0..=(read_length - guide_length) {
                             let bases = &read_bases[trim..trim + guide_length];
 
-                            if lookup.contains_key(bases) {
+                            if lookup.contains(bases) {
                                 prefix_lengths[trim] += 1;
                             }
                         }
@@ -309,7 +404,7 @@ impl Count {
         fastq: &P,
         sample: &str,
         library: &'a GuideLibrary,
-        lookup: &GuideMap,
+        lookup: &GuideLookup,
         prefix_info: &PrefixInfo,
     ) -> Result<CountResult<'a>>
     where
@@ -539,35 +634,35 @@ mod tests {
 
         // Build with one guide and no mismatches
         let library = GuideLibrary::new(vec![g1.clone()]).unwrap();
-        let lookup = Count::build_lookup(&library, false);
+        let lookup = Count::build_lookup(&library, false, false);
         assert_eq!(lookup.len(), 1);
-        assert_eq!(lookup[&g1.bases], &g1);
+        assert_eq!(lookup.get(&g1.bases), Some(&g1));
 
         // One guide with mismatches
-        let lookup = Count::build_lookup(&library, true);
+        let lookup = Count::build_lookup(&library, true, false);
         assert_eq!(lookup.len(), 31); // original plus three mismatches x ten positions
-        assert_eq!(lookup[&g1.bases], &g1);
-        assert_eq!(lookup["AAAACAAAAA".as_bytes()], &g1);
+        assert_eq!(lookup.get(&g1.bases), Some(&g1));
+        assert_eq!(lookup.get("AAAACAAAAA".as_bytes()), Some(&g1));
 
         // Two guides without mismatches
         let library = GuideLibrary::new(vec![g1.clone(), g2.clone()]).unwrap();
-        let lookup = Count::build_lookup(&library, false);
+        let lookup = Count::build_lookup(&library, false, false);
         assert_eq!(lookup.len(), 2);
-        assert_eq!(lookup[&g1.bases], &g1);
-        assert_eq!(lookup[&g2.bases], &g2);
+        assert_eq!(lookup.get(&g1.bases), Some(&g1));
+        assert_eq!(lookup.get(&g2.bases), Some(&g2));
 
         // Two guides with mismatches and no collisions
-        let lookup = Count::build_lookup(&library, true);
+        let lookup = Count::build_lookup(&library, true, false);
         assert_eq!(lookup.len(), 62);
 
         // Two guides with mismatches and collisions!
         let library = GuideLibrary::new(vec![g2.clone(), g3.clone()]).unwrap();
-        let lookup = Count::build_lookup(&library, true);
+        let lookup = Count::build_lookup(&library, true, false);
         assert_eq!(lookup.len(), 56);
-        assert_eq!(lookup[&g2.bases], &g2); // collision shouldn't override perfect match
-        assert_eq!(lookup[&g3.bases], &g3); // collision shouldn't override perfect match
-        assert!(!lookup.contains_key("CGGGGGGGGG".as_bytes())); // ambiguous
-        assert!(!lookup.contains_key("TGGGGGGGGG".as_bytes())); // ambiguous
+        assert_eq!(lookup.get(&g2.bases), Some(&g2)); // collision shouldn't override perfect match
+        assert_eq!(lookup.get(&g3.bases), Some(&g3)); // collision shouldn't override perfect match
+        assert!(!lookup.contains("CGGGGGGGGG".as_bytes())); // ambiguous
+        assert!(!lookup.contains("TGGGGGGGGG".as_bytes())); // ambiguous
     }
 
     /// Helper function to generate guide library determine_prefixes and counting tests
@@ -601,7 +696,7 @@ mod tests {
     #[test]
     fn test_determine_prefixes_finds_offset_zero() {
         let library = test_library();
-        let lookup = Count::build_lookup(&library, false);
+        let lookup = Count::build_lookup(&library, false, false);
         let reads = vec![
             format!("{}tttttttttt", library.guides[0].bases_str),
             format!("{}tttttttttt", library.guides[1].bases_str),
@@ -616,7 +711,7 @@ mod tests {
     #[test]
     fn test_determine_prefixes_finds_last_offset() {
         let library = test_library();
-        let lookup = Count::build_lookup(&library, false);
+        let lookup = Count::build_lookup(&library, false, false);
         let reads = vec![
             format!("tttttttttt{}", library.guides[0].bases_str),
             format!("tttttttttt{}", library.guides[1].bases_str),
@@ -631,7 +726,7 @@ mod tests {
     #[test]
     fn test_determine_prefixes_actually_subsamples() {
         let library = test_library();
-        let lookup = Count::build_lookup(&library, false);
+        let lookup = Count::build_lookup(&library, false, false);
 
         let mut reads = vec![];
         for _ in 0..100 {
@@ -652,7 +747,7 @@ mod tests {
     #[test]
     fn test_determine_prefixes_min_fraction() {
         let library = test_library();
-        let lookup = Count::build_lookup(&library, false);
+        let lookup = Count::build_lookup(&library, false, false);
 
         let mut reads = vec![];
         for _ in 0..50 {
@@ -686,7 +781,7 @@ mod tests {
     #[test]
     fn test_count_reads_handles_empty_fastq() {
         let library = test_library();
-        let lookup = Count::build_lookup(&library, false);
+        let lookup = Count::build_lookup(&library, false, false);
         let prefixes = PrefixInfo { lengths: vec![0, 1, 2] };
         let tempdir = TempDir::new().unwrap();
         let fastq = write_fastq(&[], tempdir.path().join("in.fastq"));
@@ -702,7 +797,7 @@ mod tests {
     #[test]
     fn test_count_reads() {
         let library = test_library();
-        let lookup = Count::build_lookup(&library, false);
+        let lookup = Count::build_lookup(&library, false, false);
         let prefixes = PrefixInfo { lengths: vec![4, 5, 6] };
         let tempdir = TempDir::new().unwrap();
         let mut reads = vec![];
@@ -786,6 +881,7 @@ mod tests {
             samples: vec!["sample1".to_string()],
             output: prefix,
             exact_match: false,
+            reverse_complement: false,
             offset_min_fraction: 0.005,
             offset_sample_size: 100000,
         };
@@ -866,6 +962,7 @@ mod tests {
             samples: vec!["sample1".to_string()],
             output: prefix,
             exact_match: false,
+            reverse_complement: false,
             offset_min_fraction: 0.005,
             offset_sample_size: 100000,
         };
@@ -873,5 +970,267 @@ mod tests {
         cmd.execute().unwrap();
         assert!(counts.exists());
         assert!(stats.exists());
+    }
+
+    /// Library with no palindromes and no fwd-vs-RC collisions between guides.
+    fn rc_clean_library() -> GuideLibrary {
+        GuideLibrary::new(vec![
+            Guide::new(0, "g1", "ACGTACGTAC", "AAA", GuideType::Other),
+            Guide::new(1, "g2", "AACCGGTTAA", "BBB", GuideType::Other),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn test_build_lookup_with_rc_folds_to_canonical() {
+        let library = rc_clean_library();
+        let g1 = &library.guides[0];
+        let g2 = &library.guides[1];
+
+        let lookup = Count::build_lookup(&library, false, false);
+        assert!(!lookup.contains(GuideLibrary::reverse_complement(&g1.bases).as_slice()));
+
+        let lookup = Count::build_lookup(&library, false, true);
+        assert_eq!(lookup.len(), 2);
+        assert_eq!(lookup.get(&g1.bases), Some(g1));
+        assert_eq!(lookup.get(&g2.bases), Some(g2));
+        assert_eq!(lookup.get(&GuideLibrary::reverse_complement(&g1.bases)), Some(g1));
+        assert_eq!(lookup.get(&GuideLibrary::reverse_complement(&g2.bases)), Some(g2));
+    }
+
+    #[test]
+    fn test_build_lookup_palindrome_one_entry() {
+        let library =
+            GuideLibrary::new(vec![Guide::new(0, "g1", "ACGTACGT", "AAA", GuideType::Other)])
+                .unwrap();
+        let g = &library.guides[0];
+        assert_eq!(GuideLibrary::reverse_complement(&g.bases), g.bases);
+
+        let lookup = Count::build_lookup(&library, false, true);
+        assert_eq!(lookup.len(), 1);
+        assert_eq!(lookup.get(&g.bases), Some(g));
+    }
+
+    fn run_collision_eviction(allow_mismatch: bool) {
+        // g1.fwd == g2.rc, plus an unrelated third guide that must remain matchable.
+        let library = GuideLibrary::new(vec![
+            Guide::new(0, "g1", "ACGTACGTAC", "AAA", GuideType::Other),
+            Guide::new(1, "g2", "GTACGTACGT", "BBB", GuideType::Other),
+            Guide::new(2, "g3", "AACCGGTTAA", "CCC", GuideType::Other),
+        ])
+        .unwrap();
+        let g1 = &library.guides[0];
+        let g2 = &library.guides[1];
+        let g3 = &library.guides[2];
+        assert_eq!(GuideLibrary::reverse_complement(&g1.bases), g2.bases);
+
+        // Forward-only mode: the "collision" doesn't exist and all three guides resolve.
+        let lookup = Count::build_lookup(&library, allow_mismatch, false);
+        assert_eq!(lookup.get(&g1.bases), Some(g1));
+        assert_eq!(lookup.get(&g2.bases), Some(g2));
+        assert_eq!(lookup.get(&g3.bases), Some(g3));
+
+        // RC mode: g1 and g2 collapse to the same canonical and are evicted together;
+        // their 1-mm neighbourhoods are absent too. g3 is untouched.
+        let lookup = Count::build_lookup(&library, allow_mismatch, true);
+        assert_eq!(lookup.get(&g1.bases), None);
+        assert_eq!(lookup.get(&g2.bases), None);
+        assert_eq!(lookup.get(&g3.bases), Some(g3));
+        assert_eq!(lookup.get(&GuideLibrary::reverse_complement(&g3.bases)), Some(g3));
+
+        if allow_mismatch {
+            // Pick any 1-mismatch of g1.bases and assert it does NOT resolve to g1 or g2.
+            let mut mm = g1.bases.clone();
+            mm[0] = if mm[0] == b'A' { b'C' } else { b'A' };
+            assert_eq!(lookup.get(&mm), None);
+        }
+    }
+
+    #[test]
+    fn test_build_lookup_fwd_rc_collision_evicts_both_exact_only() {
+        run_collision_eviction(false);
+    }
+
+    #[test]
+    fn test_build_lookup_fwd_rc_collision_evicts_both_with_mismatch() {
+        run_collision_eviction(true);
+    }
+
+    #[test]
+    fn test_probe_cross_orientation_ambiguity_returns_none() {
+        // Two distinct guides whose canonical forms are at Hamming distance 2 of each
+        // other in the fwd-vs-RC sense, so a single read R can be a 1-mm of c_A in the
+        // forward orientation AND rc(R) is a 1-mm of c_B. With canonical-only storage
+        // this can't be detected at insert time; probe() catches it by running both
+        // probes and returning None when they resolve to different guides.
+        let library = GuideLibrary::new(vec![
+            Guide::new(0, "g1", "AAACGTACGT", "AAA", GuideType::Other),
+            Guide::new(1, "g2", "ACGTACGTTC", "BBB", GuideType::Other),
+        ])
+        .unwrap();
+
+        // R differs from g1 fwd at position 0; rc(R) = ACGTACGTTG differs from g2 fwd at
+        // position 9. Both single-base mismatches, different guides => ambiguous.
+        let r = b"CAACGTACGT";
+        let lookup = Count::build_lookup(&library, true, true);
+        let g1 = &library.guides[0];
+        let g2 = &library.guides[1];
+        // Sanity: in forward-only mode each side resolves cleanly.
+        let lookup_fwd = Count::build_lookup(&library, true, false);
+        assert_eq!(lookup_fwd.get(r.as_slice()), Some(g1));
+        assert_eq!(lookup_fwd.get(GuideLibrary::reverse_complement(r).as_slice()), Some(g2));
+        // RC mode: ambiguous.
+        assert_eq!(lookup.get(r), None);
+    }
+
+    #[test]
+    fn test_build_lookup_rc_with_one_mismatch() {
+        let library = rc_clean_library();
+        let g1 = &library.guides[0];
+        let g2 = &library.guides[1];
+        let lookup = Count::build_lookup(&library, true, true);
+
+        let mut rc1 = GuideLibrary::reverse_complement(&g1.bases);
+        rc1[3] = if rc1[3] == b'A' { b'C' } else { b'A' };
+        assert_eq!(lookup.get(&rc1), Some(g1));
+
+        assert_eq!(lookup.get(&GuideLibrary::reverse_complement(&g1.bases)), Some(g1));
+        assert_eq!(lookup.get(&GuideLibrary::reverse_complement(&g2.bases)), Some(g2));
+    }
+
+    #[test]
+    fn test_probe_recovers_orientation_flipped_one_mismatch() {
+        // The guide's canonical lives on the RC orientation; the 1-mm read window R
+        // resolves only via the rc(R) probe, not the direct probe.
+        let library = GuideLibrary::new(vec![Guide::new(
+            0,
+            "g1",
+            "TTGGGGGGGG", // canonical = CCCCCCCCAA (its RC, since C < T)
+            "AAA",
+            GuideType::Other,
+        )])
+        .unwrap();
+        let g = &library.guides[0];
+
+        // R is a 1-mm of fwd_G at position 0. rc(R) = CCCCCCCCAT, which is a 1-mm of
+        // canonical CCCCCCCCAA. R itself is far from canonical and would miss alone.
+        let r = b"ATGGGGGGGG";
+        let lookup = Count::build_lookup(&library, true, true);
+        assert_eq!(lookup.get(r), Some(g));
+    }
+
+    #[test]
+    fn test_get_skips_rc_probe_on_non_acgt_window() {
+        // Windows containing N or lower-case bytes must not trip reverse_complement's
+        // ACGT panic and must miss cleanly (the lookup keys are validated upper-case).
+        let library = rc_clean_library();
+        let g1 = &library.guides[0];
+        let lookup = Count::build_lookup(&library, false, true);
+
+        let mut with_n = g1.bases.clone();
+        with_n[0] = b'N';
+        assert_eq!(lookup.get(&with_n), None);
+
+        let lower = g1.bases.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>();
+        assert_eq!(lookup.get(&lower), None);
+    }
+
+    #[test]
+    fn test_count_reads_with_rc_matches_when_enabled() {
+        let library = rc_clean_library();
+        let prefixes = PrefixInfo { lengths: vec![5] };
+
+        let mut reads = vec![];
+        for guide in library.guides.iter() {
+            let rc = GuideLibrary::reverse_complement(&guide.bases);
+            let rc_str = std::str::from_utf8(&rc).unwrap().to_string();
+            for _ in 0..7 {
+                reads.push(format!("ttttt{}ggggg", rc_str));
+            }
+        }
+
+        let tempdir = TempDir::new().unwrap();
+        let fastq = write_fastq(&reads, tempdir.path().join("rc.fastq"));
+
+        let lookup_fwd = Count::build_lookup(&library, false, false);
+        let counts = Count::count_reads(&fastq, "s", &library, &lookup_fwd, &prefixes).unwrap();
+        for guide in library.guides.iter() {
+            assert_eq!(counts.counts[guide], 0);
+        }
+
+        let lookup_rc = Count::build_lookup(&library, false, true);
+        let counts = Count::count_reads(&fastq, "s", &library, &lookup_rc, &prefixes).unwrap();
+        for guide in library.guides.iter() {
+            assert_eq!(counts.counts[guide], 7);
+        }
+    }
+
+    #[test]
+    fn test_count_reads_palindrome_counted_once_per_read() {
+        let library =
+            GuideLibrary::new(vec![Guide::new(0, "pal", "ACGTACGT", "AAA", GuideType::Other)])
+                .unwrap();
+        let g = &library.guides[0];
+        let prefixes = PrefixInfo { lengths: vec![5] };
+
+        let mut reads = vec![];
+        for _ in 0..10 {
+            reads.push(format!("ttttt{}ggggg", g.bases_str));
+        }
+        let tempdir = TempDir::new().unwrap();
+        let fastq = write_fastq(&reads, tempdir.path().join("pal.fastq"));
+
+        let lookup = Count::build_lookup(&library, false, true);
+        let counts = Count::count_reads(&fastq, "s", &library, &lookup, &prefixes).unwrap();
+        assert_eq!(counts.counts[g], 10);
+    }
+
+    #[test]
+    fn test_end_to_end_rc() {
+        let tempdir = TempDir::new().unwrap();
+
+        let library = rc_clean_library();
+        let library_path = tempdir.path().join("library.txt");
+        let mut lib_lines = vec!["guide\tbases\tgene".to_string()];
+        for guide in library.guides.iter() {
+            lib_lines.push(format!("{}\t{}\t{}", guide.id, guide.bases_str, guide.gene));
+        }
+        Io::default().write_lines(&library_path, &lib_lines).unwrap();
+
+        // RC-of-guide reads, all at offset 5.
+        let mut reads = vec![];
+        for guide in library.guides.iter() {
+            let rc = GuideLibrary::reverse_complement(&guide.bases);
+            let rc_str = std::str::from_utf8(&rc).unwrap().to_string();
+            for _ in 0..50 {
+                reads.push(format!("ttttt{}ggggg", rc_str));
+            }
+        }
+        let fastq = write_fastq(&reads, tempdir.path().join("in.fastq"));
+
+        let prefix = tempdir.path().join("out").to_str().unwrap().to_string();
+        let stats = tempdir.path().join("out.stats.txt");
+
+        let cmd = Count {
+            library: library_path,
+            input: vec![fastq],
+            essential_genes: None,
+            nonessential_genes: None,
+            control_guides: None,
+            control_pattern: None,
+            samples: vec!["sample1".to_string()],
+            output: prefix,
+            exact_match: false,
+            reverse_complement: true,
+            offset_min_fraction: 0.005,
+            offset_sample_size: 100000,
+        };
+
+        cmd.execute().unwrap();
+
+        let stat_records: Vec<CountStats> = DelimFile::default().read_tsv(&stats).unwrap();
+        assert_eq!(stat_records.len(), 1);
+        assert_eq!(stat_records[0].total_reads, 100);
+        assert_eq!(stat_records[0].mapped_reads, 100);
     }
 }
