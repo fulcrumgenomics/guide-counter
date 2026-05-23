@@ -9,7 +9,7 @@ use itertools::Itertools;
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -166,13 +166,19 @@ impl Command for Count {
 
 /// Implementation of the Count command and related functions.
 impl Count {
-    /// Tries to open every input path so all unreadable files surface in one error.
+    /// Pre-flights regular-file inputs so unreadable files surface in one early
+    /// error. Non-regular paths (FIFOs, `/dev/stdin`, `/dev/fd/N`) skip the
+    /// pre-flight: opening a stream consumes bytes or blocks waiting for a writer.
     fn check_inputs_readable(inputs: &[PathBuf]) -> Result<()> {
         let problems: Vec<String> = inputs
             .iter()
-            .filter_map(|p| match File::open(p) {
-                Ok(_) => None,
+            .filter_map(|p| match fs::metadata(p) {
                 Err(e) => Some(format!("{}: {}", p.display(), e)),
+                Ok(md) if !md.file_type().is_file() => None,
+                Ok(_) => match File::open(p) {
+                    Ok(_) => None,
+                    Err(e) => Some(format!("{}: {}", p.display(), e)),
+                },
             })
             .collect();
 
@@ -571,6 +577,24 @@ mod tests {
         let err = Count::check_inputs_readable(&[good, missing.clone()]).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains(missing.to_str().unwrap()), "error did not mention path: {}", msg);
+    }
+
+    /// On Unix, a named pipe / FIFO input must not be pre-flight-opened: doing
+    /// so would either block until a writer connects or consume bytes the
+    /// main read path would never see. Verifies the check returns Ok without
+    /// touching the FIFO (no writer is ever attached, so any open() attempt
+    /// would block this test forever).
+    #[cfg(unix)]
+    #[test]
+    fn test_check_inputs_readable_skips_named_pipe() {
+        let tempdir = TempDir::new().unwrap();
+        let fifo = tempdir.path().join("input.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("failed to spawn mkfifo");
+        assert!(status.success(), "mkfifo failed");
+        Count::check_inputs_readable(&[fifo]).unwrap();
     }
 
     #[test]
